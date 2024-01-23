@@ -39,7 +39,7 @@ class WinClient(cb.SSHClientBase):
         # noinspection PyTypeChecker
         self.pty.spawn(actual_process, cmdline=actual_process_args, cwd=cwd, env=condensed_env)
 
-        for prompt_type in self.security_settings.get_prompt_sequence():
+        for prompt_type in self.security_settings:
 
             if prompt_type == PROMPT_PASS:
                 result = self.await_password_entry()
@@ -52,6 +52,18 @@ class WinClient(cb.SSHClientBase):
                 if result != cb.SSH_DONE:
                     self.kill_pty()
                     return result
+
+            if self.pty.isalive():
+                if not self.security_settings.quiet_prompt:
+                    sys.stdout.write('<sending input>')
+
+                # Send next
+                self.pty.write(self.security_settings.next_input() + '\n')
+
+            else:
+                # On failure clear security settings and return
+                self.security_settings.clear_all()
+                return self.announce_dead()
 
         self.security_settings.clear_all()
         self.user_io()
@@ -194,15 +206,6 @@ class WinClient(cb.SSHClientBase):
             case _:
                 return self.pty.get_exitstatus() or cb.SSH_ERROR
 
-        if self.pty.isalive():
-            # Send password and clear
-            self.pty.write(self.security_settings.password + '\n')
-
-        else:
-            # Clear password and OTP
-            self.security_settings.clear_all()
-            return self.announce_dead()
-
         return cb.SSH_DONE
 
     def await_otp_entry(self) -> int:
@@ -219,23 +222,6 @@ class WinClient(cb.SSHClientBase):
                 pass
             case _:
                 return self.pty.get_exitstatus() or cb.SSH_ERROR
-
-        if self.pty.isalive():
-            # Send OTP
-            otp_mode = self.security_settings.otp_mode
-            if otp_mode == 'otp_command' and self.security_settings.run_otp_command() != 0:
-                return cb.OTP_COMMAND_ERROR
-            if otp_mode == 'totp':
-                self.security_settings.run_totp()
-            if self.security_settings.otp is None:
-                return cb.OTP_UNSET
-
-            self.pty.write(self.security_settings.otp + "\n")
-
-        else:
-            # Clear password and OTP
-            self.security_settings.clear_all()
-            return self.announce_dead()
 
         return cb.SSH_DONE
 

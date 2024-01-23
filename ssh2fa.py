@@ -15,30 +15,28 @@ else:
     raise Exception('Unsupported OS: ' + os.name)
 
 import client_base as cb
-from security_settings import SecuritySettings, SettingsException, load_totp_keyfile, PROMPT_PASS, PROMPT_OTP
-
+from security_settings import SecuritySettings
 
 ssh_client: cb.SSHClientBase | None = None
 
 
 def main():
-    # ssh2fa.py [-h] [-v] [-P PASSWORD_PROMPT] [-p PASSWORD] [-e PASS_ENV_VAR] [-f PASS_FILE] [-O OTP_PROMPT]
-    # [-o OTP] [-c OTP_COMMAND] [-t TOTP_KEYFILE] [-q] [-s PROMPT_SEQUENCE] [-n] [-x] ssh_args
+    # ssh2fa.py [-h] [-v] [-i TYPE VALUE] [-P PASSWORD_PROMPT] [-O OTP_PROMPT] [-q] [-n] [-x] ssh_args
     argparser = argparse.ArgumentParser()
     argparser.add_argument('-v', '--verbose', action='store_true', help='Use verbose output')
+    argparser.add_argument('-i', '--input', nargs=2, action='append', metavar=('TYPE', 'VALUE'),
+                           help='Input order to send to prompts. Can be specified multiple times. The following type-'
+                                'value pairs are supported: [pp PASSWORD] [pe ENV_VAR] [pf FILE_PATH] '
+                                '[op OTP] [oe ENV_VAR] [of FILE_PATH] [oc COMMAND] [rp REPEAT_IDX]')
     argparser.add_argument('-P', '--password-prompt', default='assword', help='Password prompt to look for')
-    argparser.add_argument('-p', '--password', help='Password to use')
-    argparser.add_argument('-e', '--pass-env-var', help='Environment variable containing password')
-    argparser.add_argument('-f', '--pass-file', help='File containing password')
     argparser.add_argument('-O', '--otp-prompt', default='erification code', help='OTP prompt to look for')
-    argparser.add_argument('-o', '--otp', help='OTP to use')
-    argparser.add_argument('-c', '--otp-command', help='Command to generate OTP')
-    argparser.add_argument('-t', '--totp-keyfile', help='File containng TOTP key')
-    argparser.add_argument('-q', '--quiet-prompt', action='store_true', help='Do not print prompts')
-    argparser.add_argument('-s', '--prompt-sequence', required=False, help='Order of prompts to look for (p = password, o = OTP)')
+    argparser.add_argument('-q', '--quiet-prompt', action='store_true', help='Do not print received prompts')
     argparser.add_argument('-n', '--no-ssh', action='store_true', help='Use custom SSH executable in ssh_args')
-    argparser.add_argument('-x', '--no-shell', action='store_true', help='Disables interaction after SSH connection is established')
-    argparser.add_argument('ssh_args', nargs=argparse.REMAINDER, help='Arguments to pass to SSH')
+    argparser.add_argument('-x', '--no-shell', action='store_true',
+                           help='Disables interaction after SSH connection is established')
+    argparser.add_argument('ssh_args', nargs='+', help='Arguments to pass to SSH')
+
+    # Parse the arguments
     args = argparser.parse_args()
 
     # Clear argv (might not help)
@@ -46,35 +44,31 @@ def main():
 
     # Create security settings
     security_settings = SecuritySettings(args.password_prompt, args.otp_prompt, args.quiet_prompt)
-    try:
-        if args.password:
-            security_settings.set_password(args.password)
-        if args.pass_env_var:
-            security_settings.set_password_env_var(args.pass_env_var)
-        if args.pass_file:
-            security_settings.set_password_file(args.pass_file)
-    except SettingsException:
-        print('Only expected one of -p, -e, -f', file=sys.stderr)
-        return cb.ARGS_EXCEPT
+    for input_type, value in args.input or []:
+        input_type = input_type.lower()
 
-    try:
-        if args.otp:
-            security_settings.set_otp(args.otp)
-        if args.otp_command:
-            security_settings.set_otp_command(args.otp_command)
-        if args.totp_keyfile:
-            security_settings.set_totp(*load_totp_keyfile(args.totp_keyfile))
-    except SettingsException:
-        print('Only expected one of -o, -c', file=sys.stderr)
-        return cb.ARGS_EXCEPT
-
-    if args.prompt_sequence:
-        seq = args.prompt_sequence.lower()
-        if any(c not in 'po' for c in seq):
-            print('Invalid prompt sequence (only "p" and "o" accepted)', file=sys.stderr)
+        if input_type == 'pp':
+            security_settings.add_password(value)
+        elif input_type == 'pe':
+            security_settings.add_password_env_var(value)
+        elif input_type == 'pf':
+            security_settings.add_password_file(value)
+        elif input_type == 'op':
+            security_settings.add_otp(value)
+        elif input_type == 'oe':
+            security_settings.add_otp_env_var(value)
+        elif input_type == 'of':
+            security_settings.add_totp_file(value)
+        elif input_type == 'oc':
+            security_settings.add_otp_command(value)
+        elif input_type == 'rp':
+            security_settings.add_repeated_input(int(value))
+        else:
+            print('Unknown input type: ' + input_type, file=sys.stderr)
             return cb.ARGS_EXCEPT
 
-        security_settings.set_prompt_sequence([PROMPT_PASS if c == 'p' else PROMPT_OTP for c in seq])
+    # Finish security settings
+    security_settings.clear_envs()
 
     # If args quoted, split them here (allows for -flags)
     if len(args.ssh_args) == 1:
