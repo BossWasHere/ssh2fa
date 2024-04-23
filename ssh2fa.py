@@ -5,6 +5,7 @@
 import argparse
 import os
 import signal
+import shlex
 import sys
 
 if os.name == 'posix':
@@ -72,7 +73,7 @@ def main():
 
     # If args quoted, split them here (allows for -flags)
     if len(args.ssh_args) == 1:
-        args_to_pass = args.ssh_args[0].split()
+        args_to_pass = shlex.split(args.ssh_args[0], posix=True)
     else:
         args_to_pass = args.ssh_args
 
