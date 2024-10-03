@@ -1,3 +1,4 @@
+import msvcrt
 import os
 import signal
 import subprocess
@@ -12,11 +13,12 @@ from security_settings import SecuritySettings, PROMPT_PASS, PROMPT_OTP
 
 class WinClient(cb.SSHClientBase):
 
-    def __init__(self, process_args: [str], security_settings: SecuritySettings, interactive=True, verbose=False, pty_kill_delay=0.1, read_interval=0.001):
+    def __init__(self, process_args: list[str], security_settings: SecuritySettings, interactive=True, verbose=False, pty_kill_delay=0.1, read_interval=0.001):
         super().__init__(process_args, security_settings, interactive, verbose)
         self.pty_kill_delay = pty_kill_delay
         self.read_interval = read_interval
         self.pty: winpty.PTY | None = None
+        self.last_dims = (0, 0)
 
     def run(self):
         # Check process path valid
@@ -35,6 +37,7 @@ class WinClient(cb.SSHClientBase):
 
         # Start process
         startup_dims = self.preferred_terminal_size()
+        self.last_dims = startup_dims
         self.pty = winpty.PTY(startup_dims[0], startup_dims[1])
         # noinspection PyTypeChecker
         self.pty.spawn(actual_process, cmdline=actual_process_args, cwd=cwd, env=condensed_env)
@@ -76,7 +79,7 @@ class WinClient(cb.SSHClientBase):
     def user_io(self):
         if self.interactive:
             # Start interactive input thread
-            input_thread = threading.Thread(target=_interactive_input_thread, args=(self.pty,))
+            input_thread = threading.Thread(target=self._win_interactive_input_thread, args=(self,))
             input_thread.daemon = True
             input_thread.start()
 
@@ -230,8 +233,70 @@ class WinClient(cb.SSHClientBase):
         sys.stderr.write(f'Process died with code {exit_code}\n')
         return exit_code or cb.SSH_ERROR
 
+    def update_pty_size(self):
+        current_dims = self.preferred_terminal_size()
+        if current_dims != self.last_dims:
+            self.pty.set_size(current_dims[0], current_dims[1])
+            self.last_dims = current_dims
 
-def _interactive_input_thread(pty: winpty.PTY, bufsize=4096, read_interval=0.001):
+    def _win_interactive_input_thread(self, switch_backspace=True):
+        wchseq = ''
+        byteseq = bytearray()
+        is_special_next = False
+        special_char = 0
+        while self.pty.isalive():
+            try:
+                wch = msvcrt.getwch()
+                if not self.pty.isalive():
+                    return
+                self.update_pty_size()
+
+                # special char processing
+                if is_special_next:
+                    is_special_next = False
+                    if _process_send_keypress(-1, special_char, ord(wch)):
+                        wchseq = ''
+                        continue
+
+                    # otherwise output as character instead
+
+                elif len(wchseq) == 0:
+                    if wch == '\x00':
+                        is_special_next = True
+                        special_char = 0x00
+                        wchseq += wch
+                        continue
+                    elif wch == '\xe0':
+                        is_special_next = True
+                        special_char = 0xE0
+                        wchseq += wch
+                        continue
+                    elif switch_backspace and wch == '\x08':
+                        wch = '\x7f'
+                    elif switch_backspace and wch == '\x7f':
+                        wch = '\x08'
+
+                wchseq += wch
+                try:
+                    additional_bytes = wchseq.encode('utf-16-le', 'surrogatepass')
+                    wchseq = ''
+                except UnicodeError:
+                    continue
+
+                byteseq += additional_bytes
+                try:
+                    osstr = byteseq.decode('utf-16-le')
+                    byteseq.clear()
+                    self.pty.write(osstr)
+                except UnicodeError:
+                    continue
+
+            except winpty.WinptyError as e:
+                print(e)
+                continue
+
+
+def _fallback_interactive_input_thread(pty: winpty.PTY, bufsize=4096, read_interval=0.001):
     while pty.isalive():
         try:
             data = sys.stdin.buffer.read()
@@ -241,3 +306,64 @@ def _interactive_input_thread(pty: winpty.PTY, bufsize=4096, read_interval=0.001
                 time.sleep(read_interval)
         except winpty.WinptyError:
             time.sleep(read_interval)
+
+
+def _process_send_keypress(pid, control_id, key_id):
+    keymap_00 = {
+        0x3B: 'f1',     # F1
+        0x3C: 'f2',     # F2
+        0x3D: 'f3',     # F3
+        0x3E: 'f4',     # F4
+        0x3F: 'f5',     # F5
+        0x40: 'f6',     # F6
+        0x41: 'f7',     # F7
+        0x42: 'f8',     # F8
+        0x43: 'f9',     # F9
+        0x44: 'f10',    # F10
+        0x73: 'cnp4',   # Ctrl+Numpad 4
+        0x74: 'cnp6',   # Ctrl+Numpad 6
+        0x75: 'cnp1',   # Ctrl+Numpad 1
+        0x76: 'cnp3',   # Ctrl+Numpad 3
+        0x77: 'cnp7',   # Ctrl+Numpad 7
+        0x84: 'cnp9',   # Ctrl+Numpad 9
+        0x8D: 'cnp8',   # Ctrl+Numpad 8
+        0x91: 'cnp2',   # Ctrl+Numpad 2
+    }
+    keymap_e0 = {
+        0x47: 'home',   # Home
+        0x48: 'up',     # Arrow Up
+        0x49: 'pgup',   # Page Up
+        0x4B: 'left',   # Arrow Left
+        0x4D: 'right',  # Arrow Right
+        0x4F: 'end',    # End
+        0x50: 'down',   # Arrow Down
+        0x51: 'pgdn',   # Page Down
+        0x52: 'ins',    # Insert
+        0x53: 'del',    # Delete
+        0x75: 'cend',   # Ctrl+End
+        0x76: 'cpgdn',  # Ctrl+Page Down
+        0x77: 'chome',  # Ctrl+Home
+        0x86: 'cpgup',  # Ctrl+Page Up
+        0x89: 'f11',    # F11
+        0x8A: 'f12',    # F12
+        0x92: 'cins',   # Ctrl+Insert
+        0x93: 'cdel',   # Ctrl+Delete
+    }
+    keymap_ff = {
+        0x08: 'back_',  # Backspace Character
+        0x7F: 'del__'   # Delete Character
+    }
+    
+    key = None
+    if control_id == 0x00 and key_id in keymap_00:
+        key = keymap_00[key_id]
+    elif control_id == 0xE0 and key_id in keymap_e0:
+        key = keymap_e0[key_id]
+    elif control_id == 0xFF and key_id in keymap_ff:
+        key = keymap_ff[key_id]
+    
+    if key is None:
+        return False
+
+    # TODO handle keys
+    return True
